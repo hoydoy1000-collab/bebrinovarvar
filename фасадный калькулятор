@@ -337,12 +337,21 @@
       font-weight: 700; font-size: 12px; padding: 12px 8px; text-align: center;
       border-right: 1px solid rgba(255,255,255,0.2);
     }
-    .price-table td { 
-      padding: 8px; border-bottom: 1px solid var(--border); text-align: center; 
+    .price-table td {
+      padding: 8px; border-bottom: 1px solid var(--border); text-align: center;
       font-weight: 500; font-family: 'SF Mono', Monaco, monospace;
       border-right: 1px solid #f1f5f9; background: rgba(5, 150, 105, 0.02);
     }
     .price-table td:hover { background: rgba(37, 99, 235, 0.05); }
+    .price-table td.price-custom-cell {
+      background: rgba(217, 119, 6, 0.12);
+      color: var(--warning);
+      font-weight: 700;
+    }
+    body.dark-mode .price-table td.price-custom-cell {
+      background: rgba(234, 179, 8, 0.25) !important;
+      color: #facc15 !important;
+    }
     .price-table .row-header { 
       background: var(--bg-tertiary); font-weight: 700; color: var(--primary);
       border-right: 2px solid var(--border);
@@ -1815,6 +1824,8 @@ function insertAreaResult(A, B, qty, rate) {
             <button class="button button-success" onclick="exportPriceToExcel()">📊 Экспорт прайса в Excel</button>
             <button class="button button-warning" onclick="validatePriceList()">✅ Проверить прайс</button>
             <button class="button button-info" onclick="searchInPrice()">🔍 Поиск по прайсу</button>
+            <button class="button button-secondary" onclick="openPriceEditDialog()">✏️ Редактировать прайс</button>
+            <button class="button button-danger" onclick="resetPriceToDefault()">♻️ Сбросить прайс</button>
           </div>
           
           <div class="pro-table-container">
@@ -1870,7 +1881,242 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
   FULL_PRICE_2025[w] = obj;
 }
 
-    let price = { ...FULL_PRICE_2025 };
+    const PRICE_STORAGE_KEY = 'facade_price_custom';
+
+    function deepClonePriceObject(src) {
+      try {
+        return JSON.parse(JSON.stringify(src || {}));
+      } catch (error) {
+        console.warn('Не удалось клонировать прайс', error);
+        return {};
+      }
+    }
+
+    function isLocalStorageAvailable() {
+      try {
+        if (typeof localStorage === 'undefined') return false;
+        const testKey = '__facade_price_test__';
+        localStorage.setItem(testKey, '1');
+        localStorage.removeItem(testKey);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function sanitizePriceData(obj) {
+      const result = {};
+      if (!obj || typeof obj !== 'object') return result;
+      Object.entries(obj).forEach(([width, thicknesses]) => {
+        if (!thicknesses || typeof thicknesses !== 'object') return;
+        const cleanedRow = {};
+        Object.entries(thicknesses).forEach(([thickness, value]) => {
+          const numericValue = Number(value);
+          if (!numericValue || !isFinite(numericValue) || numericValue <= 0) return;
+          cleanedRow[String(thickness)] = Math.round(numericValue * 100) / 100;
+        });
+        if (Object.keys(cleanedRow).length > 0) {
+          result[String(width)] = cleanedRow;
+        }
+      });
+      return result;
+    }
+
+    let price = deepClonePriceObject(FULL_PRICE_2025);
+    const priceLoadedFromStorage = applyStoredPriceOverrides();
+
+    function applyStoredPriceOverrides() {
+      if (!isLocalStorageAvailable()) return false;
+      try {
+        const raw = localStorage.getItem(PRICE_STORAGE_KEY);
+        if (!raw) return false;
+        const parsed = JSON.parse(raw);
+        const sanitized = sanitizePriceData(parsed);
+        if (Object.keys(sanitized).length > 0) {
+          const merged = deepClonePriceObject(FULL_PRICE_2025);
+          Object.entries(sanitized).forEach(([width, thicknesses]) => {
+            if (!merged[width]) merged[width] = {};
+            Object.entries(thicknesses).forEach(([thickness, value]) => {
+              merged[width][thickness] = value;
+            });
+          });
+          price = merged;
+          return true;
+        }
+        console.warn('Сохранённый прайс не содержит валидных значений и будет проигнорирован');
+      } catch (error) {
+        console.warn('Не удалось восстановить пользовательский прайс', error);
+      }
+      return false;
+    }
+
+    function updatePriceItemsCount() {
+      const countEl = document.getElementById('priceItemsCount');
+      if (!countEl) return;
+      const total = Object.values(price).reduce((sum, thicknesses) => {
+        if (!thicknesses || typeof thicknesses !== 'object') return sum;
+        return sum + Object.keys(thicknesses).length;
+      }, 0);
+      countEl.textContent = `${total} позиций`;
+    }
+
+    function persistPriceChanges() {
+      let status = 'memory';
+      const sanitized = sanitizePriceData(price);
+      if (Object.keys(sanitized).length > 0) {
+        price = sanitized;
+        if (isLocalStorageAvailable()) {
+          try {
+            localStorage.setItem(PRICE_STORAGE_KEY, JSON.stringify(price));
+            status = 'saved';
+          } catch (error) {
+            console.warn('Не удалось сохранить прайс в localStorage', error);
+          }
+        }
+      } else {
+        price = deepClonePriceObject(FULL_PRICE_2025);
+        if (isLocalStorageAvailable()) {
+          try {
+            localStorage.removeItem(PRICE_STORAGE_KEY);
+          } catch (error) {
+            console.warn('Не удалось удалить сохранённый прайс', error);
+          }
+        }
+        status = 'reset';
+      }
+      updatePriceItemsCount();
+      buildPriceTable();
+      return status;
+    }
+
+    function openPriceEditDialog() {
+      if (typeof Swal !== 'undefined') {
+        Swal.fire({
+          title: '✏️ Редактировать прайс',
+          html: `
+            <div style="display:flex; flex-direction:column; gap:8px; text-align:left;">
+              <label for="priceEditWidth">Ширина (мм)</label>
+              <input id="priceEditWidth" type="number" class="swal2-input" min="10" step="10" placeholder="Например, 200">
+              <label for="priceEditThickness">Толщина (мм)</label>
+              <input id="priceEditThickness" type="number" class="swal2-input" min="10" step="10" placeholder="Например, 120">
+              <label for="priceEditValue">Цена (₽/м.п.)</label>
+              <input id="priceEditValue" type="number" class="swal2-input" min="0" step="1" placeholder="Например, 2750">
+              <small style="margin-top:4px; color: var(--text-muted, #64748b);">
+                Значение ≤ 0 удалит позицию из прайса.
+              </small>
+            </div>
+          `,
+          focusConfirm: false,
+          showCancelButton: true,
+          confirmButtonText: 'Сохранить',
+          cancelButtonText: 'Отмена',
+          preConfirm: () => {
+            const width = parseInt(document.getElementById('priceEditWidth').value, 10);
+            const thickness = parseInt(document.getElementById('priceEditThickness').value, 10);
+            const value = parseFloat(document.getElementById('priceEditValue').value);
+            if (!width || width <= 0) {
+              Swal.showValidationMessage('Укажите корректную ширину в миллиметрах');
+              return false;
+            }
+            if (!thickness || thickness <= 0) {
+              Swal.showValidationMessage('Укажите корректную толщину в миллиметрах');
+              return false;
+            }
+            if (isNaN(value)) {
+              Swal.showValidationMessage('Введите числовое значение цены (можно 0 для удаления)');
+              return false;
+            }
+            return { width, thickness, value };
+          }
+        }).then(result => {
+          if (result.isConfirmed) {
+            applyPriceUpdate(result.value.width, result.value.thickness, result.value.value);
+          }
+        });
+      } else {
+        const width = parseInt(prompt('Ширина (мм):') || '', 10);
+        if (!width || width <= 0) return;
+        const thickness = parseInt(prompt('Толщина (мм):') || '', 10);
+        if (!thickness || thickness <= 0) return;
+        const value = parseFloat(prompt('Цена (₽/м.п.):') || '');
+        if (isNaN(value)) return;
+        applyPriceUpdate(width, thickness, value);
+      }
+    }
+
+    function applyPriceUpdate(width, thickness, priceValue) {
+      const wKey = String(Math.round(width));
+      const tKey = String(Math.round(thickness));
+      const numericValue = Number(priceValue);
+      const shouldRemove = !isFinite(numericValue) || numericValue <= 0;
+
+      if (shouldRemove) {
+        if (price[wKey] && Object.prototype.hasOwnProperty.call(price[wKey], tKey)) {
+          delete price[wKey][tKey];
+          if (Object.keys(price[wKey]).length === 0) {
+            delete price[wKey];
+          }
+          const status = persistPriceChanges();
+          showNotification(`Позиция ${wKey}×${tKey} мм удалена из прайса`, 'warning');
+          if (status === 'memory') {
+            showNotification('Изменения действуют до перезагрузки: localStorage недоступен.', 'info');
+          } else if (status === 'reset') {
+            showNotification('Пользовательские цены отсутствуют, используется базовый прайс.', 'info');
+          }
+        } else {
+          showNotification(`Позиция ${wKey}×${tKey} мм не найдена в прайсе`, 'info');
+        }
+        return;
+      }
+
+      if (!price[wKey] || typeof price[wKey] !== 'object') {
+        price[wKey] = {};
+      }
+
+      const finalPrice = Math.round(numericValue * 100) / 100;
+      price[wKey][tKey] = finalPrice;
+      const status = persistPriceChanges();
+      showNotification(`Цена для ${wKey}×${tKey} мм обновлена: ${formatNumber(finalPrice)} ₽/м`, 'success');
+      if (status === 'memory') {
+        showNotification('Изменения действуют до перезагрузки: localStorage недоступен.', 'info');
+      } else if (status === 'reset') {
+        showNotification('Пользовательские цены отсутствуют, используется базовый прайс.', 'info');
+      }
+    }
+
+    function resetPriceToDefault() {
+      if (typeof Swal !== 'undefined') {
+        Swal.fire({
+          title: '♻️ Сбросить прайс?',
+          text: 'Все пользовательские изменения будут удалены.',
+          icon: 'warning',
+          showCancelButton: true,
+          confirmButtonText: 'Сбросить',
+          cancelButtonText: 'Отмена'
+        }).then(result => {
+          if (result.isConfirmed) {
+            performPriceReset();
+          }
+        });
+      } else if (confirm('Сбросить прайс к значениям по умолчанию?')) {
+        performPriceReset();
+      }
+    }
+
+    function performPriceReset() {
+      price = deepClonePriceObject(FULL_PRICE_2025);
+      if (isLocalStorageAvailable()) {
+        try {
+          localStorage.removeItem(PRICE_STORAGE_KEY);
+        } catch (error) {
+          console.warn('Не удалось удалить сохранённый прайс', error);
+        }
+      }
+      updatePriceItemsCount();
+      buildPriceTable();
+      showNotification('Прайс возвращён к значениям по умолчанию', 'success');
+    }
+
     let autoCalculatedData = {};
     let calculationResults = null;
     
@@ -1992,6 +2238,7 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
     function buildPriceTable() {
       const headerRow = document.getElementById('priceTableHeader');
       const tbody = document.getElementById('priceTableBody');
+      if (!headerRow || !tbody) return;
       
       const allThicknesses = Array.from(
         new Set(Object.values(price).flatMap(obj => Object.keys(obj).map(Number)))
@@ -2007,19 +2254,29 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
       }
       
       const widths = Object.keys(price).map(Number).sort((a, b) => a - b);
-      
+
       tbody.innerHTML = widths.map(width => {
+        const widthKey = String(width);
+        const rowData = price[widthKey] || {};
+        const baseRow = FULL_PRICE_2025[widthKey] || {};
         let row = `<td class="row-header">${width}</td>`;
-        
+
         allThicknesses.forEach(thickness => {
-          const priceValue = price[width]?.[thickness];
-          if (priceValue) {
-            row += `<td title="Ширина: ${width}мм, Толщина: ${thickness}мм">${formatNumber(priceValue)}</td>`;
+          const thicknessKey = String(thickness);
+          const rawValue = Number(rowData[thicknessKey]);
+          if (rawValue && isFinite(rawValue) && rawValue > 0) {
+            const baseValue = Number(baseRow[thicknessKey]);
+            const isCustom = !isFinite(baseValue) || baseValue !== rawValue;
+            const decimals = Math.abs(rawValue - Math.round(rawValue)) > 0.001 ? 2 : 0;
+            const titleParts = [`Ширина: ${width}мм`, `Толщина: ${thickness}мм`];
+            if (isCustom) titleParts.push('Пользовательская цена');
+            const cellClass = isCustom ? 'price-custom-cell' : '';
+            row += `<td class="${cellClass}" title="${titleParts.join(' \n')}">${formatNumber(rawValue, decimals)}</td>`;
           } else {
             row += `<td style="background: #f8f9fa; color: #9ca3af;">—</td>`;
           }
         });
-        
+
         return `<tr>${row}</tr>`;
       }).join('');
     }
@@ -2033,10 +2290,12 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
       const priceData = [];
       Object.entries(price).forEach(([width, thicknesses]) => {
         Object.entries(thicknesses).forEach(([thickness, priceValue]) => {
+          const numericValue = Number(priceValue);
+          if (!numericValue || !isFinite(numericValue) || numericValue <= 0) return;
           priceData.push({
             'Ширина (мм)': width,
             'Толщина (мм)': thickness,
-            'Цена (₽/м)': priceValue
+            'Цена (₽/м)': numericValue
           });
         });
       });
@@ -2979,21 +3238,21 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
           // Ln = 2·B + A + 4·C = 2·(B+C) + (A + 2·C).
           const vertBase = B_mm + C_mm;
           const horizBase = A_mm + 2 * C_mm;
-          // Длина вертикальной стойки с отходами и припусками
-          let vertTotal = vertBase + trimMiterAdd + data.reveal;
-          vertTotal += vertTotal * (wastePercent / 100) + cuttingAllowance;
-          const vertMetersPerPiece = vertTotal / 1000;
-          const vertPricePerPiece = vertMetersPerPiece * trimLookup.p;
-          // Длина верхней планки с отходами и припусками
-          let horizTotal = horizBase + trimMiterAdd + data.reveal;
-          horizTotal += horizTotal * (wastePercent / 100) + cuttingAllowance;
-          const horizMetersPerPiece = horizTotal / 1000;
-          const horizPricePerPiece = horizMetersPerPiece * trimLookup.p;
+          // Переводим формульные значения в метры без учёта дополнительных припусков,
+          // чтобы длина деталей и цена считались строго по формулам.
+          const vertMetersPerPiece = vertBase / 1000;
+          const horizMetersPerPiece = horizBase / 1000;
+          const vertPricePerPiece = (typeof currency !== 'undefined')
+            ? currency(trimLookup.p).multiply(vertMetersPerPiece).value
+            : vertMetersPerPiece * trimLookup.p;
+          const horizPricePerPiece = (typeof currency !== 'undefined')
+            ? currency(trimLookup.p).multiply(horizMetersPerPiece).value
+            : horizMetersPerPiece * trimLookup.p;
           // Добавляем вертикальные стойки (2 шт на один проём)
           {
             const qty = 2 * data.count;
             // Общая длина и метры по всем стойкам
-            const totalLength = vertTotal * qty;
+            const totalLength = vertBase * qty;
             const totalMeters = vertMetersPerPiece * qty;
             // Для типа 1 мы считаем стоимость за одну деталь (шт), а не за метр,
             // поэтому unitPrice = цена за одну стойку (руб). В смете
@@ -3016,7 +3275,7 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
           // Добавляем верхнюю планку (1 шт на один проём)
           {
             const qty = 1 * data.count;
-            const totalLength = horizTotal * qty;
+            const totalLength = horizBase * qty;
             const totalMeters = horizMetersPerPiece * qty;
             // Для типа 1 верхняя планка также считается за штуку
             materialItems.push({
@@ -3091,20 +3350,20 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
             const vertBase2 = (B_mm - F_mm) + 2 * C_mm;
             // Верхняя планка: A (без припусков по ширине)
             const horizBase2 = A_mm;
-            // Длина вертикальной стойки с отходами и припусками
-            let vertTotal2 = vertBase2 + trimMiterAdd + data.reveal;
-            vertTotal2 += vertTotal2 * (wastePercent / 100) + cuttingAllowance;
-            const vertMetersPerPiece2 = vertTotal2 / 1000;
-            const vertPricePerPiece2 = vertMetersPerPiece2 * trimLookup.p;
-            // Длина верхней планки с отходами и припусками
-            let horizTotal2 = horizBase2 + trimMiterAdd + data.reveal;
-            horizTotal2 += horizTotal2 * (wastePercent / 100) + cuttingAllowance;
-            const horizMetersPerPiece2 = horizTotal2 / 1000;
-            const horizPricePerPiece2 = horizMetersPerPiece2 * trimLookup.p;
+            const priceInfo2 = lookupPrice(trimData.width, trimData.thickness) || trimLookup;
+            const pricePerMeter2 = priceInfo2.p || trimLookup.p;
+            const vertMetersPerPiece2 = vertBase2 / 1000;
+            const horizMetersPerPiece2 = horizBase2 / 1000;
+            const vertPricePerPiece2 = (typeof currency !== 'undefined')
+              ? currency(pricePerMeter2).multiply(vertMetersPerPiece2).value
+              : vertMetersPerPiece2 * pricePerMeter2;
+            const horizPricePerPiece2 = (typeof currency !== 'undefined')
+              ? currency(pricePerMeter2).multiply(horizMetersPerPiece2).value
+              : horizMetersPerPiece2 * pricePerMeter2;
             // Добавляем вертикальные стойки (2 шт на один проём)
             {
               const qty2 = 2 * data.count;
-              const totalLength2 = vertTotal2 * qty2;
+              const totalLength2 = vertBase2 * qty2;
               const totalMeters2 = vertMetersPerPiece2 * qty2;
               materialItems.push({
                 name: `Наличник стойка`,
@@ -3124,7 +3383,7 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
             // Добавляем верхнюю планку (1 шт на один проём)
             {
               const qty2h = 1 * data.count;
-              const totalLength2h = horizTotal2 * qty2h;
+              const totalLength2h = horizBase2 * qty2h;
               const totalMeters2h = horizMetersPerPiece2 * qty2h;
               materialItems.push({
                 name: `Наличник верх`,
@@ -3146,23 +3405,21 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
             {
               const stoneHeight = F_mm || 0;
               if (stoneHeight > 0) {
-                // Длина одного камня с припусками и отходами (без запилов)
-                let stoneTotal = stoneHeight + data.reveal;
-                stoneTotal += stoneTotal * (wastePercent / 100) + cuttingAllowance;
-                const stoneMetersPerPiece = stoneTotal / 1000;
-                // Цена за метр для камней — цена профиля наличника (trimLookup.p)
+                const stoneMetersPerPiece = stoneHeight / 1000;
                 const qtyStone = 2 * data.count;
-                const stoneUnitPrice = trimLookup.p;
+                const stoneUnitPrice = (typeof currency !== 'undefined')
+                  ? currency(pricePerMeter2).multiply(stoneMetersPerPiece).value
+                  : stoneMetersPerPiece * pricePerMeter2;
                 const stoneSum = (typeof currency !== 'undefined')
-                  ? currency(stoneMetersPerPiece).multiply(qtyStone).multiply(stoneUnitPrice).value
-                  : stoneMetersPerPiece * qtyStone * stoneUnitPrice;
+                  ? currency(stoneUnitPrice).multiply(qtyStone).value
+                  : stoneUnitPrice * qtyStone;
                 materialItems.push({
                   name: 'Камни (вставки)',
                   size: `h${stoneHeight}×${trimData.width}×${trimData.thickness}`,
                   unit: 'шт',
                   qty: qtyStone,
                   baseLength: stoneHeight,
-                  totalLength: stoneTotal * qtyStone,
+                  totalLength: stoneHeight * qtyStone,
                   meters: stoneMetersPerPiece * qtyStone,
                   unitPrice: stoneUnitPrice,
                   sum: stoneSum,
@@ -3236,25 +3493,21 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
             let D3_mm = CK3_mm; // толщина карниза
             if (!D3_mm || isNaN(D3_mm)) D3_mm = 0;
             const corniceBase3 = A_mm3 + 2 * C3_mm + 10 + 4 * D3_mm;
-            // Рассчитываем мита и припуски для вертикальных стоек
-            const vertMiter3 = trimHasMiter ? calculateAngleMiterAddition(trimData.thickness, trimAngle, data.miterExtra) : 0;
-            let vertTotal3 = vertBase3 + vertMiter3 + data.reveal;
-            vertTotal3 += vertTotal3 * (wastePercent / 100) + cuttingAllowance;
-            const vertMetersPerPiece3 = vertTotal3 / 1000;
+            const vertMetersPerPiece3 = vertBase3 / 1000;
             const vertLookup3 = lookupPrice(trimData.width, trimData.thickness);
-            const vertPricePerPiece3 = vertMetersPerPiece3 * vertLookup3.p;
-            // Рассчитываем мита и припуски для карниза
-            const corniceMiter3 = corniceHasMiter ? calculateAngleMiterAddition(D3_mm || trimData.thickness, corniceAngleCut, data.miterExtra) : 0;
-            let corniceTotal3 = corniceBase3 + corniceMiter3 + data.reveal;
-            corniceTotal3 += corniceTotal3 * (wastePercent / 100) + cuttingAllowance;
-            const corniceMetersPerPiece3 = corniceTotal3 / 1000;
+            const vertPricePerPiece3 = (typeof currency !== 'undefined')
+              ? currency(vertLookup3.p).multiply(vertMetersPerPiece3).value
+              : vertMetersPerPiece3 * vertLookup3.p;
+            const corniceMetersPerPiece3 = corniceBase3 / 1000;
             // Используем ширину и толщину карниза (CW3_mm и CK3_mm)
             const corniceLookup3 = lookupPrice(CW3_mm || trimData.width, CK3_mm || trimData.thickness);
-            const cornicePricePerPiece3 = corniceMetersPerPiece3 * corniceLookup3.p;
+            const cornicePricePerPiece3 = (typeof currency !== 'undefined')
+              ? currency(corniceLookup3.p).multiply(corniceMetersPerPiece3).value
+              : corniceMetersPerPiece3 * corniceLookup3.p;
             // Добавляем вертикальные стойки (2 шт на один проём)
             {
               const qty3 = 2 * data.count;
-              const totalLength3 = vertTotal3 * qty3;
+              const totalLength3 = vertBase3 * qty3;
               const totalMeters3 = vertMetersPerPiece3 * qty3;
               materialItems.push({
                 name: `Наличник стойка`,
@@ -3274,7 +3527,7 @@ for (const [w, arr] of Object.entries(RAW_PRICE_2025)) {
             // Добавляем карниз (1 шт на один проём)
             {
               const qty3h = 1 * data.count;
-              const totalLength3h = corniceTotal3 * qty3h;
+              const totalLength3h = corniceBase3 * qty3h;
               const totalMeters3h = corniceMetersPerPiece3 * qty3h;
               materialItems.push({
                 name: `Карниз`,
@@ -3632,7 +3885,19 @@ if (data.openingType === 'window' || data.openingType === 'type1' || data.openin
         
         // РАСЧЁТ РАБОТ
         if (includeMounting) {
-          const totalLinearMeters = materialItems.reduce((sum, item) => sum + (item.meters * item.qty), 0);
+          const totalLinearMeters = materialItems.reduce((sum, item) => {
+            const meters = item.meters || 0;
+            if (!meters) return sum;
+            const unit = (item.unit || '').toString().toLowerCase();
+            const qty = item.qty || 1;
+            if (unit === 'шт') {
+              return sum + meters;
+            }
+            if (unit === 'мп' || unit === 'м.п.' || unit === 'м.п' || unit === 'mp') {
+              return sum + meters * qty;
+            }
+            return sum;
+          }, 0);
           const finalMountingPrice = mountingPrice * workComplexity * heightFactor * accessFactor;
           const mountingCost = (typeof currency !== 'undefined')
             ? currency(totalLinearMeters).multiply(finalMountingPrice).value
@@ -3897,24 +4162,21 @@ if (data.openingType === 'window' || data.openingType === 'type1' || data.openin
             if (F_ins > 0) {
               const hasStone = materialItems.some(it => it.name === 'Камни (вставки)');
               if (!hasStone) {
-                // длина одной вставки с учётом припуска и отходов
-                let total = F_ins + data.reveal;
-                total += total * (wastePercent / 100) + cuttingAllowance;
-                const metersPerPiece = total / 1000;
+                const metersPerPiece = F_ins / 1000;
                 const qtyIns = 2 * data.count;
                 const unitPrice = (typeof currency !== 'undefined')
-                  ? currency(metersPerPiece).multiply(pMeter).value
+                  ? currency(pMeter).multiply(metersPerPiece).value
                   : metersPerPiece * pMeter;
                 const sumIns = (typeof currency !== 'undefined')
-                  ? currency(metersPerPiece).multiply(qtyIns).multiply(pMeter).value
-                  : metersPerPiece * qtyIns * pMeter;
+                  ? currency(unitPrice).multiply(qtyIns).value
+                  : unitPrice * qtyIns;
                 materialItems.push({
                   name: 'Камни (вставки)',
                   size: `h${F_ins}×${cVal}×${tVal}`,
                   unit: 'шт',
                   qty: qtyIns,
                   baseLength: F_ins,
-                  totalLength: total * qtyIns,
+                  totalLength: F_ins * qtyIns,
                   meters: metersPerPiece * qtyIns,
                   unitPrice: unitPrice,
                   sum: sumIns,
@@ -3928,23 +4190,21 @@ if (data.openingType === 'window' || data.openingType === 'type1' || data.openin
             if (data.openingType === 'type5' && G_ins > 0) {
               const hasBracket = materialItems.some(it => it.name === 'Кронштейны (вставки)');
               if (!hasBracket) {
-                let total = G_ins + data.reveal;
-                total += total * (wastePercent / 100) + cuttingAllowance;
-                const metersPerPiece = total / 1000;
+                const metersPerPiece = G_ins / 1000;
                 const qtyIns = 2 * data.count;
                 const unitPrice = (typeof currency !== 'undefined')
-                  ? currency(metersPerPiece).multiply(pMeter).value
+                  ? currency(pMeter).multiply(metersPerPiece).value
                   : metersPerPiece * pMeter;
                 const sumIns = (typeof currency !== 'undefined')
-                  ? currency(metersPerPiece).multiply(qtyIns).multiply(pMeter).value
-                  : metersPerPiece * qtyIns * pMeter;
+                  ? currency(unitPrice).multiply(qtyIns).value
+                  : unitPrice * qtyIns;
                 materialItems.push({
                   name: 'Кронштейны (вставки)',
                   size: `h${G_ins}×${cVal}×${tVal}`,
                   unit: 'шт',
                   qty: qtyIns,
                   baseLength: G_ins,
-                  totalLength: total * qtyIns,
+                  totalLength: G_ins * qtyIns,
                   meters: metersPerPiece * qtyIns,
                   unitPrice: unitPrice,
                   sum: sumIns,
@@ -4255,10 +4515,11 @@ if (data.openingType === 'window' || data.openingType === 'type1' || data.openin
       autoCalculateAll();
       updateMiterInputs();
       
-      // Подсчитываем общее количество позиций в прайсе
-      const totalPriceItems = Object.values(price).reduce((sum, thicknesses) => sum + Object.keys(thicknesses).length, 0);
-      document.getElementById('priceItemsCount').textContent = `${totalPriceItems} позиций`;
-      
+      updatePriceItemsCount();
+      if (priceLoadedFromStorage) {
+        showNotification('💾 Загружен сохранённый прайс фасадного декора', 'info');
+      }
+
       showNotification('⚡ Профессиональный калькулятор с материалами и работами загружен!', 'success');
     });
   </script>
